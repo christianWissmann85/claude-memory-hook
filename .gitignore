@@ -1,1 +1,30 @@
-/target
+# ── Rust ────────────────────────────────────────────────────────────────────
+/target/
+Cargo.lock          # library crate — omit for binaries if you prefer pinning
+
+# ── VS Code extension ────────────────────────────────────────────────────────
+claude-memory-vscode/node_modules/
+claude-memory-vscode/out/
+claude-memory-vscode/*.vsix
+
+# ── VS Code / editor ─────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+*.code-workspace
+
+# ── claude-memory data ───────────────────────────────────────────────────────
+.claude/memory.db
+.claude/memory.db-shm
+.claude/memory.db-wal
+
+# ── OS / misc ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.env
+.env.local
