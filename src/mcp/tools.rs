@@ -99,6 +99,19 @@ pub fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "name": "list_projects",
+            "description": "List all projects on this machine that have claude-memory databases. Shows session counts, date ranges, and recent branches for each project. Use this to discover past work across projects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum projects to return (default: 20)"
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -110,6 +123,7 @@ pub fn dispatch(name: &str, args: &Value, conn: &Connection) -> anyhow::Result<S
         "get_session" => handle_get_session(args, conn),
         "log_note" => handle_log_note(args, conn),
         "search_notes" => handle_search_notes(args, conn),
+        "list_projects" => handle_list_projects(args),
         _ => Ok(format!("Unknown tool: {}", name)),
     }
 }
@@ -240,6 +254,97 @@ fn handle_search_notes(args: &Value, conn: &Connection) -> anyhow::Result<String
     }
 
     Ok(output)
+}
+
+fn handle_list_projects(args: &Value) -> anyhow::Result<String> {
+    let limit = args
+        .get("limit")
+        .and_then(|l| l.as_u64())
+        .unwrap_or(20)
+        .min(50) as usize;
+
+    let current_project = crate::config::detect_project_dir().ok();
+    let projects = crate::config::discover_project_dbs();
+
+    if projects.is_empty() {
+        return Ok("No projects with memory databases found.".to_string());
+    }
+
+    let mut entries: Vec<ProjectEntry> = Vec::new();
+
+    for project in &projects {
+        let conn = match crate::db::open_readonly(&project.db_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let summary = match sessions::project_summary(&conn) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let is_current = current_project
+            .as_ref()
+            .is_some_and(|cp| cp == &project.project_dir);
+
+        let name = project
+            .project_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| project.project_dir.display().to_string());
+
+        entries.push(ProjectEntry {
+            name,
+            is_current,
+            summary,
+        });
+    }
+
+    // Current project first, then by last session date descending
+    entries.sort_by(|a, b| {
+        b.is_current.cmp(&a.is_current).then_with(|| {
+            let a_date = a.summary.last_session.as_deref().unwrap_or("");
+            let b_date = b.summary.last_session.as_deref().unwrap_or("");
+            b_date.cmp(a_date)
+        })
+    });
+
+    entries.truncate(limit);
+
+    let mut output = format!("# {} Project(s) with Memory\n\n", entries.len());
+    output.push_str("| Project | Sessions | Notes | Last Active | Branch |\n");
+    output.push_str("|---------|----------|-------|-------------|--------|\n");
+
+    for entry in &entries {
+        let marker = if entry.is_current { " **(current)**" } else { "" };
+        let last_active = entry
+            .summary
+            .last_session
+            .as_ref()
+            .map(|d| &d[..10.min(d.len())])
+            .unwrap_or("-");
+        let branch = entry.summary.last_branch.as_deref().unwrap_or("-");
+
+        output.push_str(&format!(
+            "| {}{} | {} | {} | {} | {} |\n",
+            entry.name, marker, entry.summary.session_count, entry.summary.note_count, last_active, branch,
+        ));
+    }
+
+    let total_sessions: i64 = entries.iter().map(|e| e.summary.session_count).sum();
+    let total_notes: i64 = entries.iter().map(|e| e.summary.note_count).sum();
+    output.push_str(&format!(
+        "\n_Total: {} sessions, {} notes across {} projects_\n",
+        total_sessions, total_notes, entries.len()
+    ));
+
+    Ok(output)
+}
+
+struct ProjectEntry {
+    name: String,
+    is_current: bool,
+    summary: sessions::ProjectSummary,
 }
 
 // --- Formatting helpers ---

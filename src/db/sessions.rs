@@ -210,6 +210,50 @@ pub fn get_session(conn: &Connection, session_id: &str) -> anyhow::Result<Option
     }
 }
 
+/// Lightweight project-level summary for cross-project listing.
+#[allow(dead_code)]
+pub struct ProjectSummary {
+    pub session_count: i64,
+    pub note_count: i64,
+    pub first_session: Option<String>,
+    pub last_session: Option<String>,
+    pub last_branch: Option<String>,
+}
+
+/// Get a lightweight summary from a database connection.
+/// Designed for cross-project discovery — runs fast on any memory.db.
+pub fn project_summary(conn: &Connection) -> anyhow::Result<ProjectSummary> {
+    let session_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+
+    let note_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+
+    let (first_session, last_session) = conn
+        .query_row(
+            "SELECT MIN(started_at), MAX(started_at) FROM sessions",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None));
+
+    let last_branch: Option<String> = conn
+        .query_row(
+            "SELECT git_branch FROM sessions ORDER BY started_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+
+    Ok(ProjectSummary {
+        session_count,
+        note_count,
+        first_session,
+        last_session,
+        last_branch,
+    })
+}
+
 /// Get total session count and DB stats.
 pub fn session_stats(conn: &Connection) -> anyhow::Result<(i64, i64, i64)> {
     let count: i64 =

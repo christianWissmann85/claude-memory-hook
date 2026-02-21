@@ -56,3 +56,8 @@ src/
   db/               # Database (schema, sessions, notes)
   transcript/       # JSONL parser + metadata extraction
 ```
+
+## Key Decisions
+
+- **Claude Code only** — no multi-format ingestion. See ADR-001 in README.md.
+- **`ingest` takes no flags** — reads Claude Code hook JSON from stdin, period.

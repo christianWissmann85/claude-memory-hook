@@ -6,6 +6,17 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+/// Open an existing memory database in read-only mode.
+/// Does not create directories or run migrations.
+/// Used for cross-project discovery.
+pub fn open_readonly(db_path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(conn)
+}
+
 /// Open (or create) the memory database at the given path.
 /// Enables WAL mode and creates schema if needed.
 pub fn open(db_path: &Path) -> anyhow::Result<Connection> {
