@@ -37,6 +37,8 @@ pub fn search_notes(
 ) -> anyhow::Result<Vec<NoteRow>> {
     // If we have an FTS query, use the FTS5 table
     if let Some(q) = query {
+        let sanitized = super::sanitize_fts_query(q);
+
         let mut stmt = conn.prepare(
             "SELECT n.id, n.session_id, n.content, n.tags, n.created_at
              FROM notes_fts
@@ -47,7 +49,7 @@ pub fn search_notes(
         )?;
 
         let rows = stmt
-            .query_map(params![q, limit as i64], |row| {
+            .query_map(params![sanitized, limit as i64], |row| {
                 Ok(NoteRow {
                     id: row.get(0)?,
                     session_id: row.get(1)?,

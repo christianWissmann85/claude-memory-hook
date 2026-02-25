@@ -72,9 +72,37 @@ pub fn insert_session(conn: &Connection, meta: &SessionMetadata) -> anyhow::Resu
 }
 
 /// Full-text search across sessions using FTS5.
+///
+/// Returns `(results, is_fallback)` where `is_fallback` is true if the results
+/// came from an OR query after the original AND query returned nothing.
 pub fn search_sessions(
     conn: &Connection,
     query: &str,
+    limit: usize,
+) -> anyhow::Result<(Vec<SessionRow>, bool)> {
+    let sanitized = super::sanitize_fts_query(query);
+
+    let rows = fts_match(conn, &sanitized, limit)?;
+
+    if !rows.is_empty() {
+        return Ok((rows, false));
+    }
+
+    // AND returned nothing — try OR fallback for multi-word queries
+    if let Some(or_query) = super::build_or_fallback(&sanitized) {
+        let fallback_rows = fts_match(conn, &or_query, limit)?;
+        if !fallback_rows.is_empty() {
+            return Ok((fallback_rows, true));
+        }
+    }
+
+    Ok((Vec::new(), false))
+}
+
+/// Execute an FTS5 MATCH query against sessions_fts.
+fn fts_match(
+    conn: &Connection,
+    match_expr: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
@@ -90,7 +118,7 @@ pub fn search_sessions(
     )?;
 
     let rows = stmt
-        .query_map(params![query, limit as i64], |row| {
+        .query_map(params![match_expr, limit as i64], |row| {
             Ok(SessionRow {
                 id: row.get(0)?,
                 project_dir: row.get(1)?,

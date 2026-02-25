@@ -140,13 +140,26 @@ fn handle_recall(args: &Value, conn: &Connection) -> anyhow::Result<String> {
         .unwrap_or(5)
         .min(20) as usize;
 
-    let results = sessions::search_sessions(conn, query, limit)?;
+    let (results, is_fallback) = sessions::search_sessions(conn, query, limit)?;
 
     if results.is_empty() {
         return Ok(format!("No sessions found matching: \"{}\"", query));
     }
 
-    let mut output = format!("# Found {} session(s) matching: \"{}\"\n\n", results.len(), query);
+    let mut output = if is_fallback {
+        format!(
+            "# Found {} session(s) with partial matches for: \"{}\"\n\
+             _(No exact match — showing sessions matching some of these terms)_\n\n",
+            results.len(),
+            query
+        )
+    } else {
+        format!(
+            "# Found {} session(s) matching: \"{}\"\n\n",
+            results.len(),
+            query
+        )
+    };
 
     for session in &results {
         output.push_str(&format_session_summary(session));

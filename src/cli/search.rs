@@ -11,14 +11,21 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
     }
 
     let conn = db::open(&db_path)?;
-    let results = db::sessions::search_sessions(&conn, query, limit)?;
+    let (results, is_fallback) = db::sessions::search_sessions(&conn, query, limit)?;
 
     if results.is_empty() {
         println!("No sessions found matching: {}", query);
         return Ok(());
     }
 
-    println!("Found {} session(s) matching: {}\n", results.len(), query);
+    if is_fallback {
+        println!(
+            "Found {} session(s) with partial matches for: {}\n(No exact match — showing sessions matching some of these terms)\n",
+            results.len(), query
+        );
+    } else {
+        println!("Found {} session(s) matching: {}\n", results.len(), query);
+    }
 
     for session in &results {
         let date = &session.started_at[..10.min(session.started_at.len())];

@@ -1,9 +1,18 @@
 use rusqlite::Connection;
 
+/// Current schema version. Bump this and add a migration function when changing the schema.
+const CURRENT_VERSION: i64 = 1;
+
 /// Create all tables, FTS5 indexes, and triggers if they don't exist.
+/// Runs migrations if the schema is outdated.
 pub fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
+    // Core tables (idempotent)
     conn.execute_batch(
         "
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             project_dir TEXT NOT NULL,
@@ -40,75 +49,133 @@ pub fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
         ",
     )?;
 
-    // FTS5 tables (CREATE VIRTUAL TABLE doesn't support IF NOT EXISTS in all versions,
-    // so we check manually)
-    let has_sessions_fts: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='sessions_fts'",
-        [],
-        |row| row.get(0),
-    )?;
+    let version = get_schema_version(conn)?;
 
-    if !has_sessions_fts {
-        conn.execute_batch(
-            "
-            CREATE VIRTUAL TABLE sessions_fts USING fts5(
-                user_prompts, files_modified, commands_run, git_commits, summary,
-                content=sessions, content_rowid=rowid
-            );
-
-            CREATE TRIGGER sessions_ai AFTER INSERT ON sessions BEGIN
-                INSERT INTO sessions_fts(rowid, user_prompts, files_modified, commands_run, git_commits, summary)
-                VALUES (new.rowid, new.user_prompts, new.files_modified, new.commands_run, new.git_commits, new.summary);
-            END;
-
-            CREATE TRIGGER sessions_ad AFTER DELETE ON sessions BEGIN
-                INSERT INTO sessions_fts(sessions_fts, rowid, user_prompts, files_modified, commands_run, git_commits, summary)
-                VALUES ('delete', old.rowid, old.user_prompts, old.files_modified, old.commands_run, old.git_commits, old.summary);
-            END;
-
-            CREATE TRIGGER sessions_au AFTER UPDATE ON sessions BEGIN
-                INSERT INTO sessions_fts(sessions_fts, rowid, user_prompts, files_modified, commands_run, git_commits, summary)
-                VALUES ('delete', old.rowid, old.user_prompts, old.files_modified, old.commands_run, old.git_commits, old.summary);
-                INSERT INTO sessions_fts(rowid, user_prompts, files_modified, commands_run, git_commits, summary)
-                VALUES (new.rowid, new.user_prompts, new.files_modified, new.commands_run, new.git_commits, new.summary);
-            END;
-            ",
-        )?;
+    if version < CURRENT_VERSION {
+        run_migrations(conn, version)?;
     }
 
-    let has_notes_fts: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='notes_fts'",
-        [],
-        |row| row.get(0),
+    Ok(())
+}
+
+/// Get the current schema version (0 if table is empty or freshly created).
+fn get_schema_version(conn: &Connection) -> anyhow::Result<i64> {
+    let version: Option<i64> = conn
+        .query_row(
+            "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    Ok(version.unwrap_or(0))
+}
+
+/// Set the schema version.
+fn set_schema_version(conn: &Connection, version: i64) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM schema_version", [])?;
+    conn.execute("INSERT INTO schema_version (version) VALUES (?)", [version])?;
+    Ok(())
+}
+
+/// Run all pending migrations from `from_version` to `CURRENT_VERSION`.
+fn run_migrations(conn: &Connection, from_version: i64) -> anyhow::Result<()> {
+    if from_version < 1 {
+        migrate_v0_to_v1(conn)?;
+    }
+
+    set_schema_version(conn, CURRENT_VERSION)?;
+    Ok(())
+}
+
+/// Migration v0 → v1:
+/// - Drop old FTS5 tables and triggers (no porter stemming, missing files_read)
+/// - Recreate with `tokenize='porter unicode61'` and `files_read` column
+/// - Rebuild index from existing data
+fn migrate_v0_to_v1(conn: &Connection) -> anyhow::Result<()> {
+    // Drop old sessions FTS infrastructure
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS sessions_ai;
+        DROP TRIGGER IF EXISTS sessions_ad;
+        DROP TRIGGER IF EXISTS sessions_au;
+        DROP TABLE IF EXISTS sessions_fts;
+        ",
     )?;
 
-    if !has_notes_fts {
-        conn.execute_batch(
-            "
-            CREATE VIRTUAL TABLE notes_fts USING fts5(
-                content, tags,
-                content=notes, content_rowid=rowid
-            );
+    // Drop old notes FTS infrastructure
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS notes_ai;
+        DROP TRIGGER IF EXISTS notes_ad;
+        DROP TRIGGER IF EXISTS notes_au;
+        DROP TABLE IF EXISTS notes_fts;
+        ",
+    )?;
 
-            CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
-                INSERT INTO notes_fts(rowid, content, tags)
-                VALUES (new.rowid, new.content, new.tags);
-            END;
+    // Recreate sessions FTS with porter stemming + files_read
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE sessions_fts USING fts5(
+            user_prompts, files_modified, files_read, commands_run, git_commits, summary,
+            content=sessions, content_rowid=rowid,
+            tokenize='porter unicode61'
+        );
 
-            CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
-                INSERT INTO notes_fts(notes_fts, rowid, content, tags)
-                VALUES ('delete', old.rowid, old.content, old.tags);
-            END;
+        CREATE TRIGGER sessions_ai AFTER INSERT ON sessions BEGIN
+            INSERT INTO sessions_fts(rowid, user_prompts, files_modified, files_read, commands_run, git_commits, summary)
+            VALUES (new.rowid, new.user_prompts, new.files_modified, new.files_read, new.commands_run, new.git_commits, new.summary);
+        END;
 
-            CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
-                INSERT INTO notes_fts(notes_fts, rowid, content, tags)
-                VALUES ('delete', old.rowid, old.content, old.tags);
-                INSERT INTO notes_fts(rowid, content, tags)
-                VALUES (new.rowid, new.content, new.tags);
-            END;
-            ",
-        )?;
-    }
+        CREATE TRIGGER sessions_ad AFTER DELETE ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, user_prompts, files_modified, files_read, commands_run, git_commits, summary)
+            VALUES ('delete', old.rowid, old.user_prompts, old.files_modified, old.files_read, old.commands_run, old.git_commits, old.summary);
+        END;
+
+        CREATE TRIGGER sessions_au AFTER UPDATE ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, user_prompts, files_modified, files_read, commands_run, git_commits, summary)
+            VALUES ('delete', old.rowid, old.user_prompts, old.files_modified, old.files_read, old.commands_run, old.git_commits, old.summary);
+            INSERT INTO sessions_fts(rowid, user_prompts, files_modified, files_read, commands_run, git_commits, summary)
+            VALUES (new.rowid, new.user_prompts, new.files_modified, new.files_read, new.commands_run, new.git_commits, new.summary);
+        END;
+        ",
+    )?;
+
+    // Recreate notes FTS with porter stemming
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE notes_fts USING fts5(
+            content, tags,
+            content=notes, content_rowid=rowid,
+            tokenize='porter unicode61'
+        );
+
+        CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
+            INSERT INTO notes_fts(rowid, content, tags)
+            VALUES (new.rowid, new.content, new.tags);
+        END;
+
+        CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
+            INSERT INTO notes_fts(notes_fts, rowid, content, tags)
+            VALUES ('delete', old.rowid, old.content, old.tags);
+        END;
+
+        CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
+            INSERT INTO notes_fts(notes_fts, rowid, content, tags)
+            VALUES ('delete', old.rowid, old.content, old.tags);
+            INSERT INTO notes_fts(rowid, content, tags)
+            VALUES (new.rowid, new.content, new.tags);
+        END;
+        ",
+    )?;
+
+    // Rebuild FTS indexes from existing data
+    conn.execute_batch(
+        "
+        INSERT INTO sessions_fts(sessions_fts) VALUES('rebuild');
+        INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
+        ",
+    )?;
 
     Ok(())
 }
